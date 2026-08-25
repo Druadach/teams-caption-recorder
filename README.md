@@ -1,17 +1,19 @@
 # Teams Caption Recorder
 
+> 🌐 [中文说明](README.zh-CN.md)
+
 Automatically records **Microsoft Teams meeting live captions** to timestamped
 text transcripts — no recording permission or official transcription feature
 required. Runs silently in the background and starts/stops by itself as
 meetings come and go.
 
 ```
-[17:00:54] --- Yao Haixu (690) ---
+[17:00:54] --- Alice Chen ---
 [17:00:54] But why?
 [17:00:54] Do you know why I don't want to have a same situation, right?
 [17:00:54] Because Azon have another type of palette for Yandex, we need individual palettes.
 ...
-[17:01:10] --- Olga Vasilyeva (Comp_HEAB) ---
+[17:01:10] --- Bob Wilson ---
 [17:01:10] I don't understand what a problem really.
 ```
 
@@ -69,10 +71,10 @@ One file per meeting session at `%USERPROFILE%\Documents\TeamsCaptions`:
 ```
 === session 2026-08-25 17:00:54 ===
 
-[17:00:54] --- Yao Haixu (690) ---
+[17:00:54] --- Alice Chen ---
 [17:00:54] But why?
 ...
-[17:01:02] --- Olga Vasilyeva (Comp_HEAB) ---
+[17:01:02] --- Bob Wilson ---
 [17:01:02] I don't understand what a problem really.
 ```
 

@@ -1,0 +1,10 @@
+# transcripts / logs (never commit meeting content)
+captions_*.txt
+recorder_log.txt
+recorder_err.txt
+watchdog_log.txt
+
+__pycache__/
+*.pyc
+.vscode/
+.idea/

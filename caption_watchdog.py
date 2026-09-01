@@ -36,7 +36,7 @@ def find_window():
     try:
         for w in auto.GetRootControl().GetChildren():
             t = w.Name or ''
-            if 'Microsoft Teams' in t and any(k in t for k in ('Captions', 'Meeting', '会议')):
+            if 'Microsoft Teams' in t and any(k in t for k in ('Captions', 'Meeting', '会议', '字幕')):
                 return t
     except Exception:
         pass
@@ -54,6 +54,11 @@ def main():
         except Exception as e:
             note(f'probe error: {e}')
 
+        if proc is not None and proc.poll() is not None:
+            note('recorder exited unexpectedly, restarting'
+                 if title else 'meeting ended, recorder exited')
+            proc = None
+
         if title and proc is None:
             ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
             outfile = os.path.join(OUTDIR, f'captions_{ts}.txt')
@@ -66,9 +71,6 @@ def main():
             note(f'meeting detected ({title[:60]}...) -> '
                  f'recording to {os.path.basename(outfile)} [pid {proc.pid}]')
 
-        elif not title and proc is not None and proc.poll() is not None:
-            note('meeting ended, recorder exited')
-            proc = None
 
         time.sleep(POLL_INTERVAL)
 

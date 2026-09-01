@@ -36,7 +36,7 @@ def find_window():
     """Return the Teams meeting/captions top-level window, or None."""
     for w in auto.GetRootControl().GetChildren():
         t = w.Name or ''
-        if 'Microsoft Teams' in t and any(k in t for k in ('Captions', 'Meeting', '会议')):
+        if 'Microsoft Teams' in t and any(k in t for k in ('Captions', 'Meeting', '会议', '字幕')):
             return w
     return None
 
@@ -83,12 +83,15 @@ def main():
     recorded = set()          # finalized lines already written to disk
     while True:
         try:
-            win = find_window()
-            if win is None:
-                f.write(f"\n=== window closed {datetime.datetime.now():%H:%M:%S} ===\n")
-                f.close()
-                print('window closed, exiting', flush=True)
-                break
+            try:
+                win.Name                     # window still alive? (title may
+            except Exception:                # change mid-meeting, so we keep
+                win = find_window()          # following it instead of re-matching)
+                if win is None:
+                    f.write(f"\n=== window closed {datetime.datetime.now():%H:%M:%S} ===\n")
+                    f.close()
+                    print('window closed, exiting', flush=True)
+                    break
 
             cur = get_lines(win)
             # The last two lines are still being revised by live ASR;

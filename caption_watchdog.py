@@ -31,12 +31,32 @@ def note(msg):
         pass
 
 
+CAPTION_HINTS = ('caption', 'captions', 'subtitle', 'subtitles',
+                 '字幕', '辅助字幕')
+MEETING_HINTS = ('meeting', '会议')
+TEAMS_MARKER = 'microsoft teams'
+TEAMS_CLASS = 'TeamsWebView'
+
+
 def find_window():
+    """Title of any Teams meeting/captions window, or None.
+
+    Covers both the meeting window (captions docked at the bottom) and the
+    "Open captions in new window" pop-out, whose title only carries a
+    captions keyword (e.g. "辅助字幕 | ... | Microsoft Teams").
+    """
     import uiautomation as auto
     try:
         for w in auto.GetRootControl().GetChildren():
-            t = w.Name or ''
-            if 'Microsoft Teams' in t and any(k in t for k in ('Captions', 'Meeting', '会议', '字幕')):
+            try:
+                t = w.Name or ''
+                cls = w.ClassName or ''
+            except Exception:
+                continue
+            low = t.lower()
+            if not (TEAMS_MARKER in low or cls == TEAMS_CLASS):
+                continue
+            if any(k in low for k in CAPTION_HINTS) or any(k in low for k in MEETING_HINTS):
                 return t
     except Exception:
         pass

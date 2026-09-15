@@ -34,6 +34,13 @@ logon ──> watchdog (idle, ~0 CPU)
              └──< window closes: recorder exits, watchdog returns to standby
 ```
 
+Caption text is read from whichever Teams top-level window currently shows
+it: the meeting window (captions docked at the bottom) or the separate
+**Open captions in new window** pop-out (titled e.g. `Captions | … |
+Microsoft Teams` / `辅助字幕 | …`). Both are tracked by window handle, and
+the dedicated pop-out is preferred while it exists, so switching between
+the two modes no longer interrupts the transcript.
+
 ## Requirements
 
 - Windows 10 / 11

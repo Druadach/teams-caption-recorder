@@ -13,6 +13,12 @@ If no output file is given, one is created under
 
 The recorder exits automatically when every Teams meeting/captions window
 has closed.
+
+Window detection (see teams_windows.py): the caption pop-out and the plain
+meeting window both lack reliable title keywords, so windows are classified
+by content - live-caption controls vs. call controls. Caption text is read
+from whichever window currently shows captions, so docking / popping out
+mid-meeting is followed seamlessly.
 """
 import sys, os, re, time, datetime
 
@@ -20,14 +26,15 @@ if sys.stdout is None:                      # headless (pythonw) context
     sys.stdout = open(os.devnull, 'w', encoding='utf-8')
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 import uiautomation as auto
+import teams_windows as tw
 
 POLL_INTERVAL = 0.8            # seconds between UI polls
-NOISE_LINES = {
-    'Untitled', 'Open in split screen',
-    'Captions', 'Caption', 'Live captions', 'Meeting captions',
-    '字幕', '辅助字幕',
-}
+REPROBE_INTERVAL = 15.0        # seconds between probes of caption-less windows
+EMPTY_POLLS_BEFORE_EXIT = 3    # tolerate a transient empty window list
+
 SPEAKER_RE = re.compile(r'^.{0,45}\(\d{2,8}\)$')   # "Name (id)" lines
 
 
@@ -38,160 +45,153 @@ def default_output() -> str:
     return os.path.join(outdir, f'captions_{ts}.txt')
 
 
-def _handle(win):
-    """Native window handle, or None if the control is gone."""
-    try:
-        return win.NativeWindowHandle
-    except Exception:
-        return None
-
-
-def _safe_name(win):
-    try:
-        return win.Name or ''
-    except Exception:
-        return ''
-
-
-# --- Teams window discovery -------------------------------------------------
-# Captions are shown either inside the meeting window (docked at the bottom)
-# or in a separate "Open captions in new window" pop-out (title e.g.
-# "辅助字幕 | ... | Microsoft Teams"). Both are distinct top-level windows and
-# GetChildren() lists the meeting window first, so enumerate *all* candidates
-# and prefer dedicated caption pop-outs.
-CAPTION_HINTS = ('caption', 'captions', 'subtitle', 'subtitles',
-                 '字幕', '辅助字幕')
-MEETING_HINTS = ('meeting', '会议')
-TEAMS_MARKER = 'microsoft teams'
-TEAMS_CLASS = 'TeamsWebView'
-
-
-def is_caption_window(name):
-    """True if *name* looks like a dedicated caption / pop-out window."""
-    low = (name or '').lower()
-    return any(k in low for k in CAPTION_HINTS)
-
-
-def iter_teams_windows(children=None):
-    """Every Teams top-level window that may host live captions, pop-outs first.
-
-    Pass *children* (a single GetRootControl().GetChildren() snapshot) to
-    avoid enumerating the desktop more than once per poll.
-    """
-    if children is None:
-        try:
-            children = auto.GetRootControl().GetChildren()
-        except Exception:
-            return []
-
-    wins = []
-    for w in children:
-        try:
-            name = w.Name or ''
-            cls = w.ClassName or ''
-        except Exception:
-            continue
-        low = name.lower()
-        if not (TEAMS_MARKER in low or cls == TEAMS_CLASS):
-            continue
-        if is_caption_window(name) or any(k in low for k in MEETING_HINTS):
-            wins.append(w)
-
-    wins.sort(key=lambda w: 0 if is_caption_window(_safe_name(w)) else 1)
-    return wins
-
-
-def get_lines(win):
-    """Collect all visible text lines from the captions area."""
-    lines = []
-
-    def walk(c, depth=0):
-        if depth > 30:
-            return
-        try:
-            kids = c.GetChildren()
-        except Exception:
-            return
-        for k in kids:
-            try:
-                if k.ControlTypeName == 'TextControl':
-                    n = (k.Name or '').strip()
-                    if len(n) >= 2:
-                        lines.append(n)
-                else:
-                    walk(k, depth + 1)
-            except Exception:
-                continue
-
-    walk(win)
-    return [l for l in lines if l not in NOISE_LINES]
-
-
 def main():
     outfile = sys.argv[1] if len(sys.argv) > 1 else default_output()
 
-    # Track every candidate window by native handle so title changes
-    # (screen sharing, compact view, ...) do not drop a window, and so a
-    # pop-out caption window appearing mid-meeting is picked up.
-    tracked = {}                      # native handle -> window control
-    for w in iter_teams_windows():
-        h = _handle(w)
-        if h is not None:
-            tracked[h] = w
+    # Windows worth following, keyed by native handle so title changes
+    # (screen sharing, compact view, ...) never drop one. A window stays
+    # relevant while it hosts a call or shows captions; idle Teams windows
+    # are re-probed now and then in case a meeting starts in them.
+    #
+    # Per-window state: 'caps' is the last observed caption state (None until
+    # the window has been read once), and 'checked' is when it was last walked
+    # in full. Windows that show captions are read every poll; the others are
+    # only walked periodically, because their jobs are to prove the meeting is
+    # still alive and to notice captions appearing in them.
+    tracked = {}                  # native handle -> dict(win, caps, checked)
+    idle = {}                     # native handle -> last probe time
 
-    if not tracked:
+    candidates = {}
+    for w in tw.iter_candidate_windows():
+        h = tw.handle(w)
+        if h is not None:
+            candidates[h] = w
+
+    if not candidates:
         print('No Teams meeting/captions window found - exiting.')
         sys.exit(1)
 
     f = open(outfile, 'a', encoding='utf-8')
     print(f'recording -> {outfile}', flush=True)
-    for w in tracked.values():
-        print(f'  window: {_safe_name(w)!r}', flush=True)
     f.write(f"\n=== session {datetime.datetime.now():%Y-%m-%d %H:%M:%S} ===\n")
     f.flush()
 
     recorded = set()          # finalized lines already written to disk
+    empty_polls = 0
+    had_captions = False      # whether any window showed captions last poll
     while True:
         try:
-            # One desktop snapshot per poll, shared by liveness and discovery
-            # so a window appearing mid-poll cannot be added and pruned at once.
+            # One desktop snapshot per poll for discovery and liveness.
             try:
                 children = auto.GetRootControl().GetChildren()
-                live = {_handle(c) for c in children}
+                candidates = {}
+                for w in tw.iter_candidate_windows(children):
+                    h = tw.handle(w)
+                    if h is not None:
+                        candidates[h] = w
             except Exception:
-                children, live = None, None
+                children = None
 
-            # Discover / refresh Teams windows (a pop-out may have appeared).
-            for w in iter_teams_windows(children):
-                h = _handle(w)
-                if h is None:
-                    continue
-                if h not in tracked:
-                    print(f'+ window: {_safe_name(w)!r}', flush=True)
-                tracked[h] = w
+            now = time.monotonic()
 
-            if live is not None:
+            # Discover / classify Teams windows. A caption keyword in a title
+            # is proof; otherwise the window's content decides - which is how
+            # the caption pop-out is caught despite bearing no such keyword,
+            # and how a meeting window survives a title with no "meeting"
+            # keyword either. Windows already known to be inert are re-probed
+            # only every REPROBE_INTERVAL seconds.
+            if children is not None:
+                for h, w in candidates.items():
+                    if h in tracked:
+                        continue
+                    name = tw.safe_name(w)
+                    if tw.is_caption_title(name):
+                        print(f'+ window (captions): {name!r}', flush=True)
+                        tracked[h] = {'win': w, 'caps': True, 'checked': now}
+                        idle.pop(h, None)
+                        continue
+                    if h in idle and now - idle[h] < REPROBE_INTERVAL:
+                        continue
+                    _, has_caps, has_call = tw.collect(w)
+                    if has_caps or has_call:
+                        print(f'+ window ({name!r}): captions={has_caps} call={has_call}',
+                              flush=True)
+                        tracked[h] = {'win': w, 'caps': has_caps, 'checked': now}
+                        idle.pop(h, None)
+                    else:
+                        idle[h] = now
+
+                # Prune windows that closed.
                 for h in list(tracked):
-                    if h not in live:
-                        print(f'- window: {_safe_name(tracked[h])!r}', flush=True)
+                    if h not in candidates:
+                        print(f'- window: {tw.safe_name(tracked[h]["win"])!r}', flush=True)
                         del tracked[h]
+                for h in list(idle):
+                    if h not in candidates:
+                        del idle[h]
 
             if not tracked:
-                f.write(f"\n=== window closed {datetime.datetime.now():%H:%M:%S} ===\n")
-                f.close()
-                print('window closed, exiting', flush=True)
-                break
+                empty_polls += 1
+                if empty_polls >= EMPTY_POLLS_BEFORE_EXIT:
+                    f.write(f"\n=== window closed {datetime.datetime.now():%H:%M:%S} ===\n")
+                    f.close()
+                    print('window closed, exiting', flush=True)
+                    break
+                time.sleep(POLL_INTERVAL)
+                continue
+            empty_polls = 0
 
-            # A dedicated captions pop-out is authoritative; otherwise read
-            # every tracked (meeting) window.
-            cap = [w for w in tracked.values() if is_caption_window(_safe_name(w))]
-            use = cap or list(tracked.values())
-
-            # Per window, the last two lines are still being revised by live
-            # ASR; everything before them is final.
+            # Read caption windows. Live ASR still revises a window's last two
+            # lines, so everything before them is final. A window known not to
+            # show captions is only re-walked periodically - its jobs are to
+            # prove the meeting is still alive and to notice captions appearing
+            # in it. A window that shows neither captions nor a call is dropped,
+            # which lets the recorder exit when the meeting ends.
+            #
+            # When captions were flowing and suddenly stop, every window is
+            # re-probed at once: that gap means captions moved (e.g. the
+            # pop-out was closed and they re-docked), and waiting out
+            # REPROBE_INTERVAL would lose that speech.
             finalized = []
-            for w in use:
-                cur = get_lines(w)
+            reads = []
+
+            def read_win(h, st):
+                cur, has_caps, has_call = tw.collect(st['win'])
+                st['caps'] = has_caps
+                st['checked'] = time.monotonic()
+                if has_caps:
+                    reads.append((tw.is_caption_title(tw.safe_name(st['win']))
+                                  or tw.is_popout_title(tw.safe_name(st['win'])), cur))
+                elif not has_call:
+                    del tracked[h]
+                    idle[h] = time.monotonic()
+
+            # Phase 1: the windows that were showing captions.
+            for h, st in list(tracked.items()):
+                if st['caps'] is not False:
+                    read_win(h, st)
+
+            # Captions were flowing but nothing reports them any more: they
+            # just moved, so every remaining window is re-probed at once rather
+            # than waiting out REPROBE_INTERVAL (which would lose that speech).
+            lost = had_captions and not reads
+
+            # Phase 2: windows last seen without captions.
+            for h, st in list(tracked.items()):
+                if st['caps'] is not False:
+                    continue
+                if not lost and now - st['checked'] < REPROBE_INTERVAL:
+                    continue
+                read_win(h, st)
+
+            had_captions = bool(reads)
+
+            # A dedicated caption pop-out is authoritative; if one is showing
+            # captions, ignore any other window that happens to expose some,
+            # so parallel ASR cannot write the same speech twice.
+            if any(is_popout for is_popout, _ in reads):
+                reads = [r for r in reads if r[0]]
+            for _, cur in reads:
                 finalized.extend(cur[:-2] if len(cur) > 2 else [])
 
             for line in finalized:

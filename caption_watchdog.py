@@ -5,6 +5,10 @@ checks whether a Teams meeting/captions window exists; when one appears
 it launches caption_recorder.py on a fresh timestamped transcript file.
 When the meeting ends, the recorder exits on its own and the watchdog
 goes back to standby, ready for the next meeting.
+
+Detection is content-based (see teams_windows.py) because neither the
+"Open captions in new window" pop-out nor a plain meeting window reliably
+carries a caption/meeting keyword in its title.
 """
 import os, sys, time, subprocess, datetime
 
@@ -18,6 +22,11 @@ RECORDER = os.path.join(TOOLS, 'caption_recorder.py')
 LOG    = os.path.join(OUTDIR, 'watchdog_log.txt')
 
 POLL_INTERVAL = 3
+PROBE_INTERVAL = 12            # seconds between content probes of a window
+
+sys.path.insert(0, TOOLS)
+
+_last_probe = {}               # native handle -> last content probe time
 
 
 def note(msg):
@@ -31,36 +40,45 @@ def note(msg):
         pass
 
 
-CAPTION_HINTS = ('caption', 'captions', 'subtitle', 'subtitles',
-                 '字幕', '辅助字幕')
-MEETING_HINTS = ('meeting', '会议')
-TEAMS_MARKER = 'microsoft teams'
-TEAMS_CLASS = 'TeamsWebView'
+def _probe_due(handle):
+    """Rate-limit content probes so the watchdog stays cheap.
+
+    Windows handles are reused, so a stale entry could throttle a brand-new
+    window; an unseen handle is therefore probed immediately rather than
+    treated as recently checked.
+    """
+    now = time.monotonic()
+    if now - _last_probe.get(handle, 0.0) < PROBE_INTERVAL:
+        return False
+    _last_probe[handle] = now
+    return True
+
+
+def _prune_probes(stale_handles):
+    for h in stale_handles:
+        _last_probe.pop(h, None)
 
 
 def find_window():
-    """Title of any Teams meeting/captions window, or None.
+    """Description of a window worth recording, or None.
 
-    Covers both the meeting window (captions docked at the bottom) and the
-    "Open captions in new window" pop-out, whose title only carries a
-    captions keyword (e.g. "辅助字幕 | ... | Microsoft Teams").
+    Captions and calls are detected by content (titles are only a hint), so
+    the caption pop-out and meetings without a "meeting" keyword are found.
     """
-    import uiautomation as auto
+    import teams_windows as tw
     try:
-        for w in auto.GetRootControl().GetChildren():
-            try:
-                t = w.Name or ''
-                cls = w.ClassName or ''
-            except Exception:
-                continue
-            low = t.lower()
-            if not (TEAMS_MARKER in low or cls == TEAMS_CLASS):
-                continue
-            if any(k in low for k in CAPTION_HINTS) or any(k in low for k in MEETING_HINTS):
-                return t
+        children = tw.auto.GetRootControl().GetChildren()
+        active = tw.find_active(children=children, probe=_probe_due)
     except Exception:
-        pass
-    return None
+        return None
+    if not active:
+        # Forget closed windows so the probe cache cannot grow forever.
+        live = {tw.handle(w) for w in children} if children else set()
+        _prune_probes([h for h in _last_probe if h not in live])
+        return None
+    win, reason = active
+    name = tw.safe_name(win) or 'Teams'
+    return f'{name} [{reason}]'
 
 
 def main():
@@ -88,9 +106,8 @@ def main():
             proc = subprocess.Popen(
                 [sys.executable, RECORDER, outfile],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **kwargs)
-            note(f'meeting detected ({title[:60]}...) -> '
+            note(f'meeting detected ({title[:60]}) -> '
                  f'recording to {os.path.basename(outfile)} [pid {proc.pid}]')
-
 
         time.sleep(POLL_INTERVAL)
 

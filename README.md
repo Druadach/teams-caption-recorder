@@ -29,17 +29,23 @@ A tiny watchdog process is registered to start at login:
 
 ```
 logon ──> watchdog (idle, ~0 CPU)
-             │  detects "… | Microsoft Teams" meeting window
+             │  finds a window showing captions or hosting a call
              ├──> launches recorder -> Documents/TeamsCaptions/captions_<ts>.txt
              └──< window closes: recorder exits, watchdog returns to standby
 ```
 
-Caption text is read from whichever Teams top-level window currently shows
-it: the meeting window (captions docked at the bottom) or the separate
-**Open captions in new window** pop-out (titled e.g. `Captions | … |
-Microsoft Teams` / `辅助字幕 | …`). Both are tracked by window handle, and
-the dedicated pop-out is preferred while it exists, so switching between
-the two modes no longer interrupts the transcript.
+Caption text is read from whichever Teams top-level window currently shows it:
+the meeting window (captions docked at the bottom) or the separate **Open
+captions in new window** pop-out. Both are tracked by window handle, so
+switching between the two modes never interrupts the transcript.
+
+Which window is which is decided by **content, not title**. Titles are
+unreliable: the pop-out carries no caption keyword (its title is just
+`… | Microsoft Teams | Pinned window`), and a running meeting's title is
+usually only the meeting name. So a window is treated as a caption source
+when it exposes live-caption controls, and as a live meeting when it exposes
+call controls (hangup, roster, mic, …). A title keyword, when present, is
+just a cheap fast path.
 
 ## Requirements
 
@@ -70,6 +76,16 @@ pip install uiautomation
 python caption_recorder.py            # record right now, auto output path
 python caption_watchdog.py            # or run the auto-start loop
 ```
+
+### Tests
+
+```powershell
+python test_caption_tracking.py       # window/caption classification
+python test_recorder_loop.py          # recorder loop across docked -> pop-out
+```
+
+Both are offline: they drive the real logic against fake window trees, so no
+meeting (and no Teams) is needed.
 
 ## Output format
 
